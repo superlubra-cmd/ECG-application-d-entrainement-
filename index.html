@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ECG Training App — Préhospitalier Genevois</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f4f8;color:#1a2a3a;min-height:100vh}
+input,select,textarea,button{font-family:inherit}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#f0f4f8}::-webkit-scrollbar-thumb{background:#b0bec5;border-radius:3px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback,useMemo}=React;
+
+const C={
+  primary:"#1565C0",primaryL:"#E3F2FD",primaryD:"#0D47A1",
+  green:"#2E7D32",greenL:"#E8F5E9",
+  yellow:"#F57F17",yellowL:"#FFFDE7",
+  amber:"#E65100",amberL:"#FFF3E0",
+  red:"#B71C1C",redL:"#FFEBEE",
+  grey:"#455A64",greyL:"#ECEFF1",
+  white:"#fff",border:"#CFD8DC",
+  bg:"#f0f4f8",card:"#fff",
+  text:"#1a2a3a",textMuted:"#607D8B",
+  accent:"#1976D2",accentL:"#BBDEFB",
+};
+
+const sGet=k=>new Promise(r=>{try{const v=window.localStorage.getItem(k);r(v?JSON.parse(v):null)}catch{r(null)}});
+const sSet=(k,v)=>new Promise(r=>{try{window.localStorage.setItem(k,JSON.stringify(v));r(true)}catch{r(false)}});
+
+const uid=()=>Math.random().toString(36).slice(2,10);
+const now=()=>new Date().toISOString();
+const fmtDate=s=>s?new Date(s).toLocaleDateString('fr-CH',{day:'2-digit',month:'2-digit',year:'numeric'}):'—';
+const fmtTime=s=>{if(!s&&s!==0)return'—';const m=Math.floor(s/60),sec=s%60;return`${m}:${sec.toString().padStart(2,'0')}`};
+const parseBpm=s=>{const n=parseInt((s||'').replace(/[^0-9]/g,''));return isNaN(n)?null:n};
+const fcCorrect=(a,c)=>{const av=parseBpm(a),cv=parseBpm(c);if(av===null||cv===null)return false;return Math.abs(av-cv)<=25};
+
+const SCORED_STEPS=["rythme","axe","ondeP","pr","qrs","st","ondeT","qtc"];
+const ALL_SCORED=["fc",...SCORED_STEPS];
+const ALL_STEPS=["fc","rythme","axe","ondeP","pr","qrs","st","ondeT","qtc","diagnostic","conclusion"];
+const ADMIN_CODE='SFCspa1890';
+
+const calcScore=(a,c)=>{
+  const fc=fcCorrect(a.fc,c.fc)?1:0;
+  const steps=SCORED_STEPS.reduce((s,k)=>s+(a[k]&&c[k]&&a[k]===c[k]?1:0),0);
+  return fc+steps;
+};
+const pct=(score,max)=>max>0?Math.round(score/max*100):0;
+const statColor=p=>p>=81?C.green:p>=70?C.yellow:p>=51?C.amber:C.red;
+const statBg=p=>p>=81?C.greenL:p>=70?C.yellowL:p>=51?C.amberL:C.redL;
+const speedScore=s=>s===null?null:s<120?100:s<240?75:s<360?50:25;
+const combinedScore=(ap,sp)=>sp===null?ap:Math.round(ap*0.7+sp*0.3);
+
+const STEP_LABELS={
+  fc:"Fréquence cardiaque",rythme:"Rythme",axe:"Axe électrique",
+  ondeP:"Onde P",pr:"Espace PR",qrs:"Complexe QRS",
+  st:"Segment ST",ondeT:"Onde T",qtc:"QTc",
+  diagnostic:"Diagnostic principal",conclusion:"Conclusion / Plan"
+};
+
+const STEP_HELP_DEFAULT={
+  fc:{
+    source:"BSC/SMUR Genève — CORFA 6.1 / e-cardiogram (Dr Taboulet, 2025)",
+    content:[
+      "Méthode 300 : 300 → 150 → 100 → 75 → 60 → 50 (diviser 300 par nb de grands carreaux entre 2 QRS)",
+      "Méthode rapide : 1500 / nb de petits carreaux entre 2 QRS",
+      "Normal : 60–100 bpm",
+      "Bradycardie : < 60 bpm",
+      "Tachycardie : > 100 bpm",
+      "Tolérance acceptée : ±25 bpm par rapport à la valeur de référence"
+    ]
+  },
+  rythme:{
+    source:"e-cardiogram (Dr Taboulet, 2025) / LITFL (Cadogan & Buttner, 2022)",
+    content:[
+      "Rythme sinusal : onde P positive en DII, négative en aVR, PR constant",
+      "Rythme régulier : intervalles RR constants (< 10% variation)",
+      "Rythme irrégulier : intervalles RR variables",
+      "Origine : sinusal / jonctionnel / ventriculaire / électroentraîné"
+    ]
+  },
+  axe:{
+    source:"e-cardiogram (Dr Taboulet, 2025) / AHA-ACCF-HRS 2009",
+    content:[
+      "Normal : -30° à +90° (adulte)",
+      "Déviation gauche : < -30° (HBAG, HVG, BBG)",
+      "Déviation droite : > +90° (HVD, EP, HBPG)",
+      "Méthode rapide : QRS positif en DI et aVF → axe normal"
+    ]
+  },
+  ondeP:{
+    source:"e-cardiogram (Dr Taboulet, 2025) / LITFL (Cadogan & Buttner, 2022)",
+    content:[
+      "Durée normale : < 120 ms (< 3 petits carreaux)",
+      "Amplitude normale : < 2,5 mm en DII",
+      "Morphologie : positive en DI, DII, aVF / négative en aVR",
+      "Allongement : hypertrophie auriculaire, HAG si bifide en DII"
+    ]
+  },
+  pr:{
+    source:"e-cardiogram (Dr Taboulet, 2025) / LITFL (Cadogan & Buttner, 2022)",
+    content:[
+      "Normal : 120–200 ms (3–5 petits carreaux)",
+      "Allongé > 200 ms : BAV I",
+      "Variable / progressif : BAV II Mobitz I (Wenckebach)",
+      "Fixe avec QRS manquants : BAV II Mobitz II",
+      "Absent : FA, rythme jonctionnel, WPW"
+    ]
+  },
+  qrs:{
+    source:"BSC/SMUR Genève — Protocole 5.1 SCA (v1.7b, 15.12.2023) / e-cardiogram (Dr Taboulet, 2025)",
+    content:[
+      "Durée normale : < 120 ms (< 3 petits carreaux)",
+      "QRS large ≥ 120 ms : bloc de branche, rythme ventriculaire, préexcitation",
+      "BBD : RSR' en V1, onde S large en DI/V6",
+      "BBG : QRS large, onde R large et crochetée en DI/V6, aspect QS en V1",
+      "Amplitude : onde R > 25 mm en V5-V6 = HVG"
+    ]
+  },
+  st:{
+    source:"BSC/SMUR Genève — Protocole 5.1 SCA (v1.7b, 15.12.2023) / ESC ACS 2023",
+    content:[
+      "Mesure au point J (jonction QRS-ST)",
+      "Sus-décalage pathologique : ≥ 1 mm dans ≥ 2 dérivations contiguës des membres, ≥ 2 mm en V2-V3 (homme), ≥ 1,5 mm (femme)",
+      "Sous-décalage : ≥ 0,5 mm = suspect, ≥ 1 mm = significatif",
+      "Territoire antérieur : V1-V4 (IVA)",
+      "Territoire inférieur : DII, DIII, aVF (CD / Cx)",
+      "Territoire latéral : DI, aVL, V5-V6 (Cx / IVA dist.)",
+      "Miroir inférieur → chercher extension postérieure (V7-V9)"
+    ]
+  },
+  ondeT:{
+    source:"ECG Pocketbook / Cours ESAMB (Ibsen) / LITFL (Cadogan & Buttner, 2022)",
+    content:[
+      "Normale : concordante avec QRS, asymétrique, branche montante lente",
+      "Inversion : ischémie, HVG, BBG, EP, RIVA, variante normale en aVR/V1",
+      "Hyperaiguë : large, symétrique, sans onde Q → stade précoce STEMI",
+      "Aplatissement : ischémie sous-endocardique, hypokaliémie",
+      "Biphasique : syndrome de Wellens V2-V3 — à valider avec cardiologue référent"
+    ]
+  },
+  qtc:{
+    source:"e-cardiogram (Dr Taboulet, 2025) / LITFL (Cadogan & Buttner, 2022)",
+    content:[
+      "Formule de Bazett : QTc = QT / √RR (RR en secondes)",
+      "Normal : < 440 ms (homme), < 460 ms (femme)",
+      "Allongé : > 440 ms (H) / > 460 ms (F) → risque torsades de pointes",
+      "Court : < 360 ms → risque arythmie",
+      "Causes allongement : médicaments, hypokaliémie, hypomagnésémie, hypocalcémie, SQTL congénital"
+    ]
+  },
+  diagnostic:{
+    source:"CORFA 6.1 / BSC/SMUR Genève",
+    content:[
+      "Intégrer l'ensemble des données de l'analyse systématique",
+      "Corréler avec le contexte clinique (douleur, dyspnée, syncope...)",
+      "STEMI : sus-décalage + clinique → activation filière urgente",
+      "FA rapide : rythme irrégulier, absence d'onde P, QRS fins habituellement",
+      "TV : QRS larges, tachycardie, dissociation AV"
+    ]
+  },
+  conclusion:{
+    source:"CORFA 6.1 / Protocoles BSC/SMUR Genève",
+    content:[
+      "Résumer les anomalies trouvées",
+      "Proposer une orientation thérapeutique selon les protocoles CORFA/BSC",
+      "Signaler toute anomalie urgente au médecin régulateur / SMUR",
+      "Documenter l'heure de l'ECG et les modifications évolutives"
+    ]
+  }
+};
+
+const DIAGNOSTICS_GROUPED=[
+  {group:"Rythmes de base",items:["Normal - Rythme sinusal","Bradycardie sinusale","Tachycardie sinusale","Rythme électroentraîné (pace)"]},
+  {group:"Arythmies supraventriculaires",items:["Fibrillation auriculaire (FA)","Flutter auriculaire","Tachycardie supraventriculaire (TSV)","Extrasystoles auriculaires (ESA)","Tachycardie atriale"]},
+  {group:"Arythmies ventriculaires",items:["Tachycardie ventriculaire (TV)","Fibrillation ventriculaire (FV)","Asystolie","AESP (Activité Électrique Sans Pouls)","Torsades de pointes","Extrasystoles ventriculaires (ESV)","RIVA (rythme idioventriculaire accéléré)"]},
+  {group:"Blocs de conduction",items:["BAV I","BAV II - Mobitz I (Wenckebach)","BAV II - Mobitz II","BAV III (complet)","Bloc de branche gauche (BBG)","Bloc de branche droit (BBD)","Hémibloc antérieur gauche (HBAG)"]},
+  {group:"Ischémie / SCA",items:["STEMI antérieur (V1-V4)","STEMI inférieur (DII, DIII, aVF)","STEMI latéral (DI, aVL, V5-V6)","STEMI postérieur","STEMI équivalent (BBG/BBD nouveau)","NSTEMI / Ischémie sous-endocardique","Syndrome de Wellens","Signe de De Winter"]},
+  {group:"Autre",items:["Hypertrophie ventriculaire gauche (HVG)","Hypertrophie ventriculaire droite (HVD)","Embolie pulmonaire (pattern S1Q3T3)","Hyperkaliémie","Hypokaliémie","Péricardite","WPW / Préexcitation","Autre"]},
+];
+
+const TERRITORIES={
+  "STEMI antérieur (V1-V4)":{artery:"IVA (interventriculaire antérieure)",leads:"V1-V4",mirror:"ST↓ aVR"},
+  "STEMI inférieur (DII, DIII, aVF)":{artery:"CD (coronaire droite) ou Cx",leads:"DII,DIII,aVF",mirror:"Chercher extension lat/post"},
+  "STEMI latéral (DI, aVL, V5-V6)":{artery:"Cx (circonflexe) ou IVA dist.",leads:"DI,aVL,V5-V6",mirror:""},
+  "STEMI postérieur":{artery:"CD ou Cx",leads:"V7-V9 (ST↓ V1-V3)",mirror:"Miroir en V1-V3"},
+};
+
+function Leaderboard({subs,submissions}){
+  const board=useMemo(()=>{
+    const byUser={};
+    (submissions||[]).forEach(s=>{
+      if(!s.userId||!s.completed)return;
+      if(!byUser[s.userId])byUser[s.userId]={scores:[],speeds:[]};
+      byUser[s.userId].scores.push(pct(s.score||0,s.maxScore||ALL_SCORED.length));
+      if(s.timeSeconds!=null)byUser[s.userId].speeds.push(speedScore(s.timeSeconds));
+    });
+    return Object.entries(byUser).map(([uid,d])=>{
+      const avgA=d.scores.length?Math.round(d.scores.reduce((a,b)=>a+b,0)/d.scores.length):0;
+      const avgS=d.speeds.length?Math.round(d.speeds.reduce((a,b)=>a+b,0)/d.speeds.length):null;
+      const combined=combinedScore(avgA,avgS);
+      const sub=(subs||[]).find(s=>s.id===uid);
+      return{uid,name:sub?.pseudo||sub?.login||uid.slice(0,6),avgA,avgS,combined,n:d.scores.length};
+    }).sort((a,b)=>b.combined-a.combined).slice(0,10);
+  },[subs,submissions]);
+  if(!board.length)return null;
+  const medals=["🥇","🥈","🥉"];
+  return(
+    <div style={{background:C.card,borderRadius:12,padding:16,border:`1px solid ${C.border}`,marginTop:16}}>
+      <div style={{fontWeight:700,fontSize:15,color:C.primary,marginBottom:12}}>🏆 Top 10 — Classement général</div>
+      <div style={{fontSize:11,color:C.textMuted,marginBottom:8}}>Score combiné : 70% analyse · 30% rapidité</div>
+      {board.map((r,i)=>(
+        <div key={r.uid} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0',borderBottom:i<board.length-1?`1px solid ${C.border}`:'none'}}>
+          <span style={{width:24,textAlign:'center',fontSize:14}}>{medals[i]||`${i+1}`}</span>
+          <span style={{flex:1,fontWeight:i<3?700:400,fontSize:13}}>{r.name}</span>
+          <span style={{fontSize:12,color:statColor(r.avgA),fontWeight:600}}>{r.avgA}%</span>
+          <span style={{fontSize:11,color:C.textMuted}}>· {r.avgS!=null?`${r.avgS}pts`:'—'}</span>
+          <span style={{fontSize:13,fontWeight:700,color:statColor(r.combined),minWidth:36,textAlign:'right'}}>{r.combined}%</span>
+          <span style={{fontSize:11,color:C.textMuted,minWidth:28,textAlign:'right'}}>{r.n}ECG</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CoronaireMap({diagnosis}){
+  const info=TERRITORIES[diagnosis];
+  if(!info)return null;
+  return(
+    <div style={{background:C.redL,border:`1px solid ${C.red}`,borderRadius:8,padding:10,marginTop:8,fontSize:12}}>
+      <div style={{fontWeight:700,color:C.red,marginBottom:4}}>🫀 Territoire coronarien</div>
+      <div><b>Artère :</b> {info.artery}</div>
+      <div><b>Dérivations :</b> {info.leads}</div>
+      {info.mirror&&<div><b>Miroir :</b> {info.mirror}</div>}
+    </div>
+  );
+}
+
+function HelpPanel({step,stepHelp,override}){
+  const h=override[step]||(stepHelp&&stepHelp[step])||STEP_HELP_DEFAULT[step];
+  if(!h)return null;
+  return(
+    <div style={{background:C.primaryL,border:`1px solid ${C.accentL}`,borderRadius:8,padding:10,fontSize:12,marginTop:8}}>
+      <div style={{fontWeight:700,color:C.primary,marginBottom:4}}>💡 Aide — {STEP_LABELS[step]||step}</div>
+      <div style={{color:C.textMuted,fontSize:11,marginBottom:6}}>Source : {h.source||'—'}</div>
+      <ul style={{paddingLeft:16}}>
+        {(h.content||[]).map((l,i)=><li key={i} style={{marginBottom:2}}>{l}</li>)}
+      </ul>
+    </div>
+  );
+}
+
+function Chrono({running,onTick}){
+  const [s,setS]=useState(0);
+  const ref=useRef(null);
+  useEffect(()=>{
+    if(running){ref.current=setInterval(()=>setS(p=>{const n=p+1;onTick&&onTick(n);return n}),1000)}
+    else clearInterval(ref.current);
+    return()=>clearInterval(ref.current);
+  },[running]);
+  const m=Math.floor(s/60),sec=s%60;
+  return<span style={{fontVariantNumeric:'tabular-nums'}}>{m}:{sec.toString().padStart(2,'0')}</span>;
+}
+
+function ECGImage({src,alt}){
+  const [zoom,setZoom]=useState(false);
+  if(!src)return<div style={{background:C.greyL,borderRadius:8,padding:20,textAlign:'center',color:C.textMuted,fontSize:13}}>Aucune image ECG</div>;
+  return(
+    <>
+      <img src={src} alt={alt||'ECG'} onClick={()=>setZoom(true)} style={{width:'100%',borderRadius:8,cursor:'zoom-in',border:`1px solid ${C.border}`}}/>
+      {zoom&&(
+        <div onClick={()=>setZoom(false)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.85)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',cursor:'zoom-out'}}>
+          <img src={src} alt={alt||'ECG'} style={{maxWidth:'95vw',maxHeight:'95vh',borderRadius:8}}/>
+        </div>
+      )}
+    </>
+  );
+}
+
+function AdminStats({subs,submissions,ecgs}){
+  const [month,setMonth]=useState('');
+  const [userF,setUserF]=useState('');
+  const filtered=useMemo(()=>(submissions||[]).filter(s=>{
+    if(month&&!s.startedAt?.startsWith(month))return false;
+    if(userF&&s.userId!==userF)return false;
+    return s.completed;
+  }),[submissions,month,userF]);
+  const months=[...new Set((submissions||[]).map(s=>s.startedAt?.slice(0,7)).filter(Boolean))].sort().reverse();
+  const users=[...new Set((submissions||[]).map(s=>s.userId).filter(Boolean))];
+  const avgScore=filtered.length?Math.round(filtered.reduce((a,s)=>a+pct(s.score||0,s.maxScore||ALL_SCORED.length),0)/filtered.length):null;
+  const avgTime=filtered.filter(s=>s.timeSeconds!=null).length?Math.round(filtered.filter(s=>s.timeSeconds!=null).reduce((a,s)=>a+s.timeSeconds,0)/filtered.filter(s=>s.timeSeconds!=null).length):null;
+  const stepStats={};
+  ALL_SCORED.forEach(k=>{stepStats[k]={ok:0,total:0}});
+  filtered.forEach(s=>{
+    const ecg=(ecgs||[]).find(e=>e.id===s.ecgId);
+    if(!ecg?.correction)return;
+    ALL_SCORED.forEach(k=>{
+      if(!(k in ecg.correction))return;
+      stepStats[k].total++;
+      if(k==='fc'){if(fcCorrect(s.answers?.[k],ecg.correction[k]))stepStats[k].ok++}
+      else{if(s.answers?.[k]===ecg.correction[k])stepStats[k].ok++}
+    });
+  });
+  const weakSteps=Object.entries(stepStats).filter(([,d])=>d.total>0).map(([k,d])=>({k,p:pct(d.ok,d.total),n:d.total})).sort((a,b)=>a.p-b.p).slice(0,3);
+  return(
+    <div>
+      <div style={{display:'flex',gap:8,marginBottom:16,flexWrap:'wrap'}}>
+        <select value={month} onChange={e=>setMonth(e.target.value)} style={{padding:'6px 8px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}>
+          <option value=''>Tous les mois</option>
+          {months.map(m=><option key={m} value={m}>{m}</option>)}
+        </select>
+        <select value={userF} onChange={e=>setUserF(e.target.value)} style={{padding:'6px 8px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}>
+          <option value=''>Tous les utilisateurs</option>
+          {users.map(u=>{const sub=(subs||[]).find(s=>s.id===u);return<option key={u} value={u}>{sub?.pseudo||sub?.login||u.slice(0,6)}</option>})}
+        </select>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:8,marginBottom:16}}>
+        {[
+          {label:'ECG analysés',val:filtered.length,color:C.primary},
+          {label:'Score moyen',val:avgScore!=null?`${avgScore}%`:'—',color:avgScore!=null?statColor(avgScore):C.grey},
+          {label:'Temps moyen',val:avgTime!=null?fmtTime(avgTime):'—',color:C.grey},
+          {label:'Utilisateurs actifs',val:[...new Set(filtered.map(s=>s.userId))].length,color:C.green},
+        ].map((k,i)=>(
+          <div key={i} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:12,textAlign:'center'}}>
+            <div style={{fontSize:20,fontWeight:700,color:k.color}}>{k.val}</div>
+            <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>{k.label}</div>
+          </div>
+        ))}
+      </div>
+      {weakSteps.length>0&&(
+        <div style={{background:C.amberL,border:`1px solid ${C.amber}`,borderRadius:8,padding:12,marginBottom:16}}>
+          <div style={{fontWeight:700,fontSize:13,color:C.amber,marginBottom:8}}>⚠️ Points d'amélioration</div>
+          {weakSteps.map(s=>(
+            <div key={s.k} style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+              <span style={{flex:1,fontSize:13}}>{STEP_LABELS[s.k]||s.k}</span>
+              <span style={{fontWeight:700,color:statColor(s.p),fontSize:13}}>{s.p}%</span>
+              <span style={{color:C.textMuted,fontSize:11}}>({s.n} tentatives)</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+          <thead><tr style={{background:C.greyL}}>
+            {['ECG','Tentatives','Score moy.','Tps moy.'].map(h=><th key={h} style={{padding:'6px 8px',textAlign:'left',border:`1px solid ${C.border}`}}>{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {(ecgs||[]).map(ecg=>{
+              const rows=filtered.filter(s=>s.ecgId===ecg.id);
+              if(!rows.length)return null;
+              const avg=Math.round(rows.reduce((a,s)=>a+pct(s.score||0,s.maxScore||ALL_SCORED.length),0)/rows.length);
+              const times=rows.filter(s=>s.timeSeconds!=null);
+              const avgT=times.length?Math.round(times.reduce((a,s)=>a+s.timeSeconds,0)/times.length):null;
+              return(<tr key={ecg.id}>
+                <td style={{padding:'6px 8px',border:`1px solid ${C.border}`}}>{ecg.title||ecg.id}</td>
+                <td style={{padding:'6px 8px',textAlign:'center',border:`1px solid ${C.border}`}}>{rows.length}</td>
+                <td style={{padding:'6px 8px',textAlign:'center',border:`1px solid ${C.border}`,color:statColor(avg),fontWeight:600}}>{avg}%</td>
+                <td style={{padding:'6px 8px',textAlign:'center',border:`1px solid ${C.border}`}}>{avgT!=null?fmtTime(avgT):'—'}</td>
+              </tr>);
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AdminRefs({stepHelp,onSave}){
+  const [sel,setSel]=useState('fc');
+  const [edit,setEdit]=useState(null);
+  const [modified,setModified]=useState({});
+  const current=stepHelp?.[sel]||STEP_HELP_DEFAULT[sel];
+  const startEdit=()=>setEdit({source:current.source||'',content:[...(current.content||[])]});
+  const restore=()=>{const newH={...stepHelp};delete newH[sel];const newMod={...modified};delete newMod[sel];setModified(newMod);onSave(newH);setEdit(null)};
+  const save=()=>{if(!edit)return;const newH={...(stepHelp||{}),[sel]:edit};setModified({...modified,[sel]:true});onSave(newH);setEdit(null)};
+  return(
+    <div>
+      <div style={{marginBottom:12,display:'flex',gap:8,flexWrap:'wrap'}}>
+        {ALL_STEPS.map(k=>(
+          <button key={k} onClick={()=>{setSel(k);setEdit(null)}}
+            style={{padding:'4px 10px',borderRadius:6,border:`1px solid ${sel===k?C.primary:C.border}`,background:sel===k?C.primaryL:C.white,cursor:'pointer',fontSize:12,color:sel===k?C.primary:C.text}}>
+            {STEP_LABELS[k]||k}{(modified[k]||(stepHelp&&stepHelp[k]))&&<span style={{marginLeft:4,color:C.amber,fontSize:10}}>●</span>}
+          </button>
+        ))}
+      </div>
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:14}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+          <span style={{fontWeight:700,flex:1}}>{STEP_LABELS[sel]||sel}</span>
+          {stepHelp?.[sel]&&<span style={{fontSize:11,background:C.amberL,color:C.amber,borderRadius:4,padding:'2px 6px'}}>Modifié</span>}
+          {!edit&&<div style={{display:'flex',gap:6}}>
+            <button onClick={startEdit} style={{padding:'4px 10px',borderRadius:6,background:C.primary,color:C.white,border:'none',cursor:'pointer',fontSize:12}}>Modifier</button>
+            {stepHelp?.[sel]&&<button onClick={restore} style={{padding:'4px 10px',borderRadius:6,background:C.redL,color:C.red,border:`1px solid ${C.red}`,cursor:'pointer',fontSize:12}}>Restaurer</button>}
+          </div>}
+        </div>
+        {!edit?(
+          <><div style={{fontSize:11,color:C.textMuted,marginBottom:8}}>Source : {current.source||'—'}</div>
+          <ul style={{paddingLeft:16,fontSize:13}}>{(current.content||[]).map((l,i)=><li key={i} style={{marginBottom:4}}>{l}</li>)}</ul></>
+        ):(
+          <>
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:12,color:C.textMuted,marginBottom:4}}>Source</div>
+              <input value={edit.source} onChange={e=>setEdit({...edit,source:e.target.value})} style={{width:'100%',padding:'6px 8px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}/>
+            </div>
+            <div>
+              <div style={{fontSize:12,color:C.textMuted,marginBottom:4}}>Contenu</div>
+              {edit.content.map((l,i)=>(
+                <div key={i} style={{display:'flex',gap:6,marginBottom:4}}>
+                  <input value={l} onChange={e=>{const c=[...edit.content];c[i]=e.target.value;setEdit({...edit,content:c})}} style={{flex:1,padding:'5px 8px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}/>
+                  <button onClick={()=>setEdit({...edit,content:edit.content.filter((_,j)=>j!==i)})} style={{padding:'4px 8px',borderRadius:6,border:`1px solid ${C.red}`,background:C.redL,color:C.red,cursor:'pointer',fontSize:12}}>✕</button>
+                </div>
+              ))}
+              <button onClick={()=>setEdit({...edit,content:[...edit.content,'']})} style={{padding:'4px 10px',borderRadius:6,border:`1px solid ${C.primary}`,background:C.primaryL,color:C.primary,cursor:'pointer',fontSize:12,marginTop:4}}>+ Ajouter</button>
+            </div>
+            <div style={{display:'flex',gap:8,marginTop:12}}>
+              <button onClick={save} style={{padding:'6px 14px',borderRadius:6,background:C.primary,color:C.white,border:'none',cursor:'pointer',fontSize:13}}>Sauvegarder</button>
+              <button onClick={()=>setEdit(null)} style={{padding:'6px 14px',borderRadius:6,border:`1px solid ${C.border}`,background:C.white,cursor:'pointer',fontSize:13}}>Annuler</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TrainingAdmin({trainLib,onSave}){
+  const [form,setForm]=useState(null);
+  const [list,setList]=useState(trainLib||[]);
+  useEffect(()=>setList(trainLib||[]),[trainLib]);
+  const blank={id:uid(),title:'',category:'',imageUrl:'',correction:{},notes:''};
+  const del=id=>{const l=list.filter(e=>e.id!==id);setList(l);onSave(l)};
+  const save=item=>{const l=form?.id&&list.find(e=>e.id===form.id)?list.map(e=>e.id===item.id?item:e):[...list,item];setList(l);onSave(l);setForm(null)};
+  if(form){
+    const upd=f=>setForm({...form,...f});
+    return(
+      <div>
+        <button onClick={()=>setForm(null)} style={{marginBottom:12,padding:'4px 10px',borderRadius:6,border:`1px solid ${C.border}`,background:C.white,cursor:'pointer',fontSize:12}}>← Retour</button>
+        <div style={{display:'flex',flexDirection:'column',gap:10}}>
+          {[{label:'Titre',key:'title'},{label:'Catégorie',key:'category'},{label:"URL image",key:'imageUrl'},{label:'Notes',key:'notes'}].map(f=>(
+            <div key={f.key}>
+              <div style={{fontSize:12,color:C.textMuted,marginBottom:3}}>{f.label}</div>
+              <input value={form[f.key]||''} onChange={e=>upd({[f.key]:e.target.value})} style={{width:'100%',padding:'6px 8px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}/>
+            </div>
+          ))}
+          <div>
+            <div style={{fontSize:12,color:C.textMuted,marginBottom:6}}>Correction</div>
+            {ALL_STEPS.map(k=>(
+              <div key={k} style={{display:'flex',gap:8,marginBottom:6,alignItems:'center'}}>
+                <span style={{width:120,fontSize:12,color:C.textMuted}}>{STEP_LABELS[k]||k}</span>
+                {k==='fc'?(
+                  <div style={{display:'flex',alignItems:'center',gap:4}}>
+                    <input type="number" value={(form.correction?.[k]||'').replace(/[^0-9]/g,'')} onChange={e=>upd({correction:{...form.correction,[k]:e.target.value?`${e.target.value} bpm`:''}})} placeholder="bpm" style={{width:70,padding:'4px 6px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13,textAlign:'right'}}/>
+                    <span style={{fontSize:13,color:C.textMuted}}>bpm</span>
+                  </div>
+                ):k==='diagnostic'?(
+                  <select value={form.correction?.[k]||''} onChange={e=>upd({correction:{...form.correction,[k]:e.target.value}})} style={{flex:1,padding:'4px 6px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}>
+                    <option value=''>— choisir —</option>
+                    {DIAGNOSTICS_GROUPED.map(g=><optgroup key={g.group} label={g.group}>{g.items.map(d=><option key={d} value={d}>{d}</option>)}</optgroup>)}
+                  </select>
+                ):(
+                  <input value={form.correction?.[k]||''} onChange={e=>upd({correction:{...form.correction,[k]:e.target.value}})} style={{flex:1,padding:'4px 6px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}/>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={()=>save(form)} style={{padding:'7px 16px',borderRadius:6,background:C.primary,color:C.white,border:'none',cursor:'pointer',fontSize:13}}>Sauvegarder</button>
+            <button onClick={()=>setForm(null)} style={{padding:'7px 16px',borderRadius:6,border:`1px solid ${C.border}`,background:C.white,cursor:'pointer',fontSize:13}}>Annuler</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return(
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+        <span style={{fontWeight:600,fontSize:14}}>ECG d'entraînement ({list.length})</span>
+        <button onClick={()=>setForm({...blank})} style={{padding:'6px 12px',borderRadius:6,background:C.primary,color:C.white,border:'none',cursor:'pointer',fontSize:13}}>+ Ajouter</button>
+      </div>
+      {list.length===0&&<div style={{color:C.textMuted,fontSize:13,padding:'20px 0',textAlign:'center'}}>Aucun ECG d'entraînement</div>}
+      {list.map(e=>(
+        <div key={e.id} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 10px',background:C.greyL,borderRadius:8,marginBottom:6}}>
+          <span style={{flex:1,fontSize:13,fontWeight:500}}>{e.title||'Sans titre'}</span>
+          <span style={{fontSize:11,color:C.textMuted}}>{e.category||'—'}</span>
+          <button onClick={()=>setForm({...e})} style={{padding:'3px 8px',borderRadius:5,border:`1px solid ${C.primary}`,color:C.primary,background:C.primaryL,cursor:'pointer',fontSize:12}}>Modifier</button>
+          <button onClick={()=>del(e.id)} style={{padding:'3px 8px',borderRadius:5,border:`1px solid ${C.red}`,color:C.red,background:C.redL,cursor:'pointer',fontSize:12}}>Supprimer</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TrainingMode({trainLib,stepHelp,stepHelpOverride}){
+  const [sel,setSel]=useState(null);
+  const [answers,setAnswers]=useState({});
+  const [showResult,setShowResult]=useState(false);
+  const [showHelp,setShowHelp]=useState({});
+  const reset=()=>{setAnswers({});setShowResult(false);setShowHelp({})};
+  if(!sel){
+    return(
+      <div>
+        <div style={{fontWeight:600,fontSize:14,marginBottom:12}}>Mode entraînement libre ({(trainLib||[]).length} ECG)</div>
+        {(trainLib||[]).length===0&&<div style={{color:C.textMuted,fontSize:13,padding:20,textAlign:'center'}}>Aucun ECG d'entraînement disponible</div>}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))',gap:10}}>
+          {(trainLib||[]).map(e=>(
+            <div key={e.id} onClick={()=>{setSel(e);reset()}} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:12,cursor:'pointer'}}
+              onMouseEnter={ev=>ev.currentTarget.style.boxShadow='0 2px 8px rgba(0,0,0,0.12)'}
+              onMouseLeave={ev=>ev.currentTarget.style.boxShadow='none'}>
+              {e.imageUrl&&<img src={e.imageUrl} alt={e.title} style={{width:'100%',borderRadius:6,marginBottom:6,maxHeight:80,objectFit:'cover'}}/>}
+              <div style={{fontWeight:600,fontSize:13}}>{e.title||'Sans titre'}</div>
+              {e.category&&<div style={{fontSize:11,color:C.textMuted,marginTop:2}}>{e.category}</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  const score=calcScore(answers,sel.correction||{});
+  const maxScore=ALL_SCORED.filter(k=>k in (sel.correction||{})).length;
+  const p=pct(score,maxScore);
+  return(
+    <div>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+        <button onClick={()=>{setSel(null);reset()}} style={{padding:'4px 10px',borderRadius:6,border:`1px solid ${C.border}`,background:C.white,cursor:'pointer',fontSize:12}}>← Retour</button>
+        <span style={{fontWeight:700,fontSize:15,flex:1}}>{sel.title}</span>
+      </div>
+      {sel.imageUrl&&<ECGImage src={sel.imageUrl} alt={sel.title}/>}
+      {sel.notes&&<div style={{background:C.greyL,borderRadius:8,padding:10,fontSize:12,marginTop:8,marginBottom:8}}>{sel.notes}</div>}
+      <div style={{marginTop:12}}>
+        {ALL_STEPS.map(k=>{
+          const h=stepHelpOverride?.[k]||stepHelp?.[k]||STEP_HELP_DEFAULT[k];
+          const isScored=ALL_SCORED.includes(k)&&k in (sel.correction||{});
+          const isFC=k==='fc';
+          const correct=isFC?fcCorrect(answers[k],sel.correction?.[k]):answers[k]===sel.correction?.[k];
+          return(
+            <div key={k} style={{background:C.card,border:`1px solid ${showResult&&isScored?(correct?C.green:C.red):C.border}`,borderRadius:8,padding:12,marginBottom:8}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{fontWeight:600,fontSize:13,flex:1}}>{STEP_LABELS[k]||k}</span>
+                {isScored&&<span style={{fontSize:11,color:C.textMuted}}>scoré</span>}
+                {h&&<button onClick={()=>setShowHelp(p=>({...p,[k]:!p[k]}))} style={{padding:'2px 7px',borderRadius:5,border:`1px solid ${C.accentL}`,background:C.primaryL,color:C.primary,cursor:'pointer',fontSize:11}}>?</button>}
+                {showResult&&isScored&&<span style={{fontSize:13}}>{correct?'✅':'❌'}</span>}
+              </div>
+              {showHelp[k]&&<HelpPanel step={k} stepHelp={stepHelp} override={stepHelpOverride||{}}/>}
+              {k==='fc'?(
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  <input type="number" value={(answers[k]||'').replace(/[^0-9]/g,'')} onChange={e=>setAnswers(p=>({...p,[k]:e.target.value?`${e.target.value} bpm`:''}))} placeholder="ex: 75" style={{width:80,padding:'6px 8px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:14,textAlign:'right'}}/>
+                  <span style={{fontSize:14,color:C.textMuted}}>bpm</span>
+                  <span style={{fontSize:11,color:C.textMuted}}>(±25 bpm accepté)</span>
+                </div>
+              ):k==='diagnostic'?(
+                <select value={answers[k]||''} onChange={e=>setAnswers(p=>({...p,[k]:e.target.value}))} style={{width:'100%',padding:'6px 8px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}>
+                  <option value=''>— choisir —</option>
+                  {DIAGNOSTICS_GROUPED.map(g=><optgroup key={g.group} label={g.group}>{g.items.map(d=><option key={d} value={d}>{d}</option>)}</optgroup>)}
+                </select>
+              ):(
+                <input value={answers[k]||''} onChange={e=>setAnswers(p=>({...p,[k]:e.target.value}))} placeholder={`Réponse ${STEP_LABELS[k]||k}`} style={{width:'100%',padding:'6px 8px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}/>
+              )}
+              {showResult&&isScored&&!correct&&(
+                <div style={{marginTop:6,fontSize:12,color:C.green,background:C.greenL,borderRadius:6,padding:'4px 8px'}}>Correction : {sel.correction?.[k]}{k==='fc'&&' (±25 bpm)'}</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{display:'flex',gap:8,marginTop:12}}>
+        {!showResult?(
+          <button onClick={()=>setShowResult(true)} style={{padding:'8px 18px',borderRadius:6,background:C.primary,color:C.white,border:'none',cursor:'pointer',fontSize:14,fontWeight:600}}>Voir la correction</button>
+        ):(
+          <>
+            <div style={{flex:1,background:statBg(p),border:`1px solid ${statColor(p)}`,borderRadius:8,padding:'8px 14px',textAlign:'center'}}>
+              <span style={{fontWeight:700,fontSize:18,color:statColor(p)}}>{p}%</span>
+              <span style={{fontSize:12,color:C.textMuted,marginLeft:8}}>{score}/{maxScore}</span>
+            </div>
+            <button onClick={reset} style={{padding:'8px 14px',borderRadius:6,border:`1px solid ${C.primary}`,color:C.primary,background:C.primaryL,cursor:'pointer',fontSize:13}}>Recommencer</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function App(){
+  const [ready,setReady]=useState(false);
+  const [view,setView]=useState('home');
+  const [subView,setSubView]=useState('ecgs');
+  const [adminTab,setAdminTab]=useState('ecgs');
+  const [userId,setUserId]=useState(null);
+  const [subs,setSubs]=useState([]);
+  const [isAdmin,setIsAdmin]=useState(false);
+  const [ecgs,setEcgs]=useState([]);
+  const [docs,setDocs]=useState([]);
+  const [cats,setCats]=useState(['Général']);
+  const [trainLib,setTrainLib]=useState([]);
+  const [users,setUsers]=useState([]);
+  const [stepHelp,setStepHelp]=useState(null);
+  const [submissions,setSubmissions]=useState([]);
+  const [activeEcg,setActiveEcg]=useState(null);
+  const [activeStep,setActiveStep]=useState(0);
+  const [answers,setAnswers]=useState({});
+  const [showHelp,setShowHelp]=useState({});
+  const [chronoRunning,setChronoRunning]=useState(false);
+  const [elapsed,setElapsed]=useState(0);
+  const [subId,setSubId]=useState(null);
+  const [iframeError,setIframeError]=useState({});
+  const [stepHelpOverride]=useState({});
+  const [loginForm,setLoginForm]=useState({login:'',pass:'',pseudo:'',adminCode:''});
+  const [loginError,setLoginError]=useState('');
+  const [loginMode,setLoginMode]=useState('login');
+  const [ecgForm,setEcgForm]=useState(null);
+  const [lastResult,setLastResult]=useState(null);
+
+  useEffect(()=>{
+    (async()=>{
+      const [su,ss,se,sd,sc,stl,sus,ssh,ssub]=await Promise.all([
+        sGet('ecg:userId'),sGet('ecg:subs'),sGet('ecg:ecgs'),
+        sGet('ecg:docs'),sGet('ecg:cats'),sGet('ecg:trainLib'),
+        sGet('ecg:users'),sGet('ecg:stepHelp'),sGet('ecg:submissions')
+      ]);
+      if(su)setUserId(su);
+      if(ss)setSubs(ss);
+      if(se)setEcgs(se);
+      if(sd)setDocs(sd);
+      if(sc)setCats(sc);
+      if(stl)setTrainLib(stl);
+      if(sus)setUsers(sus);
+      if(ssh)setStepHelp(ssh);
+      if(ssub)setSubmissions(ssub);
+      if(su&&sus){const me=(sus||[]).find(u=>u.id===su);if(me?.isAdmin)setIsAdmin(true)}
+      setReady(true);
+    })();
+  },[]);
+
+  useEffect(()=>{if(userId)sSet('ecg:userId',userId)},[userId]);
+  useEffect(()=>{sSet('ecg:subs',subs)},[subs]);
+  useEffect(()=>{sSet('ecg:ecgs',ecgs)},[ecgs]);
+  useEffect(()=>{sSet('ecg:docs',docs)},[docs]);
+  useEffect(()=>{sSet('ecg:cats',cats)},[cats]);
+  useEffect(()=>{sSet('ecg:trainLib',trainLib)},[trainLib]);
+  useEffect(()=>{sSet('ecg:users',users)},[users]);
+  useEffect(()=>{if(stepHelp!==null)sSet('ecg:stepHelp',stepHelp)},[stepHelp]);
+  useEffect(()=>{sSet('ecg:submissions',submissions)},[submissions]);
+
+  const me=useMemo(()=>(subs||[]).find(s=>s.id===userId),[subs,userId]);
+
+  const saveEcg=useCallback(ecg=>{
+    setEcgs(prev=>prev.find(e=>e.id===ecg.id)?prev.map(e=>e.id===ecg.id?ecg:e):[...prev,ecg]);
+  },[]);
+
+  const startEcg=useCallback(ecg=>{
+    setActiveEcg(ecg);setActiveStep(0);setAnswers({});setShowHelp({});
+    setElapsed(0);setChronoRunning(true);setLastResult(null);
+    const id=uid();setSubId(id);
+    setSubmissions(prev=>[...prev,{id,userId,ecgId:ecg.id,startedAt:now(),completed:false,answers:{},score:0,maxScore:ALL_SCORED.length}]);
+    setView('ecg');
+  },[userId]);
+
+  const submitEcg=useCallback(()=>{
+    if(!activeEcg)return;
+    setChronoRunning(false);
+    const score=calcScore(answers,activeEcg.correction||{});
+    const maxScore=ALL_SCORED.length;
+    const p=pct(score,maxScore);
+    const sp=speedScore(elapsed||null);
+    const combined=combinedScore(p,sp);
+    setLastResult({score,maxScore,p,sp,combined,elapsed,answers,correction:activeEcg.correction||{}});
+    setSubmissions(prev=>prev.map(s=>s.id===subId?{...s,completed:true,answers,score,maxScore,timeSeconds:elapsed,completedAt:now()}:s));
+    setView('result');
+  },[activeEcg,answers,elapsed,subId]);
+
+  const doLogin=()=>{
+    setLoginError('');
+    const {login,pass}=loginForm;
+    if(!login||!pass){setLoginError('Identifiants requis');return}
+    const found=(subs||[]).find(s=>s.login===login.trim()&&s.pass===pass);
+    if(!found){setLoginError('Identifiants incorrects');return}
+    setUserId(found.id);
+    const us=(users||[]).find(u=>u.id===found.id);
+    if(us?.isAdmin)setIsAdmin(true);
+    setView('home');
+  };
+
+  const doRegister=()=>{
+    setLoginError('');
+    const {login,pass,pseudo,adminCode}=loginForm;
+    if(!login||!pass){setLoginError('Login et mot de passe requis');return}
+    if((subs||[]).find(s=>s.login===login.trim())){setLoginError('Login déjà utilisé');return}
+    if(!pseudo.trim()){setLoginError('Pseudonyme requis');return}
+    const isAdminCreate=adminCode===ADMIN_CODE;
+    const id=uid();
+    const newSub={id,login:login.trim(),pass,pseudo:pseudo.trim(),createdAt:now()};
+    const newUser={id,isAdmin:isAdminCreate,createdAt:now()};
+    setSubs(p=>[...p,newSub]);
+    setUsers(p=>[...p,newUser]);
+    setUserId(id);
+    if(isAdminCreate)setIsAdmin(true);
+    setView('home');
+  };
+
+  const doLogout=()=>{setUserId(null);setIsAdmin(false);setView('home')};
+
+  if(!ready)return<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',color:C.primary,fontSize:16}}>Chargement…</div>;
+
+  /* LOGIN */
+  if(!userId){
+    return(
+      <div style={{minHeight:'100vh',background:C.bg,display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+        <div style={{background:C.white,borderRadius:16,padding:32,width:'100%',maxWidth:380,boxShadow:'0 4px 24px rgba(0,0,0,0.10)'}}>
+          <div style={{textAlign:'center',marginBottom:24}}>
+            <div style={{fontSize:32,marginBottom:8}}>🫀</div>
+            <div style={{fontWeight:800,fontSize:22,color:C.primary}}>ECG Training</div>
+            <div style={{fontSize:13,color:C.textMuted}}>Préhospitalier Genevois</div>
+          </div>
+          <div style={{display:'flex',gap:4,marginBottom:20,background:C.greyL,borderRadius:8,padding:3}}>
+            {['login','register'].map(m=>(
+              <button key={m} onClick={()=>{setLoginMode(m);setLoginError('')}}
+                style={{flex:1,padding:'6px 0',borderRadius:6,border:'none',cursor:'pointer',fontWeight:600,fontSize:13,
+                  background:loginMode===m?C.primary:C.greyL,color:loginMode===m?C.white:C.textMuted}}>
+                {m==='login'?'Connexion':'Créer un compte'}
+              </button>
+            ))}
+          </div>
+          {loginMode==='register'&&(
+            <>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:12,color:C.textMuted,marginBottom:4}}>Pseudonyme (affiché dans les classements)</div>
+                <input value={loginForm.pseudo} onChange={e=>setLoginForm(p=>({...p,pseudo:e.target.value}))}
+                  placeholder="Ex: Ben_ACE" style={{width:'100%',padding:'8px 10px',borderRadius:8,border:`1px solid ${C.border}`,fontSize:14}}/>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:12,color:C.textMuted,marginBottom:4}}>Code administrateur <span style={{fontStyle:'italic'}}>(optionnel)</span></div>
+                <input type="password" value={loginForm.adminCode} onChange={e=>setLoginForm(p=>({...p,adminCode:e.target.value}))}
+                  placeholder="Laisser vide si non admin" style={{width:'100%',padding:'8px 10px',borderRadius:8,border:`1px solid ${C.border}`,fontSize:14}}/>
+              </div>
+            </>
+          )}
+          <div style={{marginBottom:12}}>
+            <div style={{fontSize:12,color:C.textMuted,marginBottom:4}}>Login SPA</div>
+            <input value={loginForm.login} onChange={e=>setLoginForm(p=>({...p,login:e.target.value}))}
+              placeholder="Votre login SPA" style={{width:'100%',padding:'8px 10px',borderRadius:8,border:`1px solid ${C.border}`,fontSize:14}}
+              onKeyDown={e=>e.key==='Enter'&&(loginMode==='login'?doLogin():doRegister())}/>
+          </div>
+          <div style={{marginBottom:16}}>
+            <div style={{fontSize:12,color:C.textMuted,marginBottom:4}}>Mot de passe</div>
+            <input type="password" value={loginForm.pass} onChange={e=>setLoginForm(p=>({...p,pass:e.target.value}))}
+              placeholder="••••••••" style={{width:'100%',padding:'8px 10px',borderRadius:8,border:`1px solid ${C.border}`,fontSize:14}}
+              onKeyDown={e=>e.key==='Enter'&&(loginMode==='login'?doLogin():doRegister())}/>
+          </div>
+          {loginError&&<div style={{background:C.redL,border:`1px solid ${C.red}`,color:C.red,borderRadius:8,padding:'8px 10px',fontSize:13,marginBottom:12}}>{loginError}</div>}
+          <button onClick={loginMode==='login'?doLogin:doRegister}
+            style={{width:'100%',padding:'10px 0',borderRadius:8,background:C.primary,color:C.white,border:'none',cursor:'pointer',fontSize:15,fontWeight:700}}>
+            {loginMode==='login'?'Se connecter':'Créer le compte'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ECG ANALYSIS */
+  if(view==='ecg'&&activeEcg){
+    const step=ALL_STEPS[activeStep];
+    const isLast=activeStep===ALL_STEPS.length-1;
+    const isFC=step==='fc';
+    const isDiag=step==='diagnostic';
+    const h=stepHelpOverride?.[step]||stepHelp?.[step]||STEP_HELP_DEFAULT[step];
+    return(
+      <div style={{minHeight:'100vh',background:C.bg,padding:16}}>
+        <div style={{maxWidth:680,margin:'0 auto'}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
+            <button onClick={()=>{setView('home');setChronoRunning(false)}} style={{padding:'4px 10px',borderRadius:6,border:`1px solid ${C.border}`,background:C.white,cursor:'pointer',fontSize:12}}>← Quitter</button>
+            <div style={{flex:1,fontWeight:700,fontSize:15,color:C.primary}}>{activeEcg.title||'ECG sans titre'}</div>
+            <div style={{fontSize:13,color:C.textMuted,display:'flex',alignItems:'center',gap:4}}>⏱ <Chrono running={chronoRunning} onTick={setElapsed}/></div>
+          </div>
+          <div style={{display:'flex',gap:3,marginBottom:12}}>
+            {ALL_STEPS.map((s,i)=><div key={s} style={{flex:1,height:4,borderRadius:2,background:i<=activeStep?C.primary:C.border}}/>)}
+          </div>
+          <div style={{fontSize:12,color:C.textMuted,marginBottom:12,textAlign:'right'}}>{activeStep+1}/{ALL_STEPS.length} — {STEP_LABELS[step]||step}</div>
+          {activeEcg.imageUrl&&<ECGImage src={activeEcg.imageUrl} alt={activeEcg.title}/>}
+          {step==='st'&&activeEcg.correction?.diagnostic&&<CoronaireMap diagnosis={activeEcg.correction.diagnostic}/>}
+          <div style={{background:C.white,borderRadius:12,padding:16,marginTop:12,border:`1px solid ${C.border}`}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+              <span style={{fontWeight:700,fontSize:16,flex:1}}>{STEP_LABELS[step]||step}</span>
+              {ALL_SCORED.includes(step)&&<span style={{fontSize:11,background:C.accentL,color:C.primary,borderRadius:4,padding:'2px 6px'}}>scoré</span>}
+              {h&&<button onClick={()=>setShowHelp(p=>({...p,[step]:!p[step]}))} style={{padding:'3px 9px',borderRadius:6,border:`1px solid ${C.accentL}`,background:C.primaryL,color:C.primary,cursor:'pointer',fontSize:12}}>Aide</button>}
+            </div>
+            {showHelp[step]&&<HelpPanel step={step} stepHelp={stepHelp} override={stepHelpOverride}/>}
+            {isFC?(
+              <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}>
+                <input type="number" value={(answers[step]||'').replace(/[^0-9]/g,'')}
+                  onChange={e=>setAnswers(p=>({...p,[step]:e.target.value?`${e.target.value} bpm`:''}))}
+                  placeholder="ex: 75" style={{width:90,padding:'8px 10px',borderRadius:8,border:`2px solid ${C.border}`,fontSize:18,fontWeight:700,textAlign:'right'}} autoFocus/>
+                <span style={{fontSize:16,color:C.textMuted,fontWeight:500}}>bpm</span>
+                <span style={{fontSize:12,color:C.textMuted}}>(±25 bpm accepté)</span>
+              </div>
+            ):isDiag?(
+              <select value={answers[step]||''} onChange={e=>setAnswers(p=>({...p,[step]:e.target.value}))}
+                style={{width:'100%',padding:'8px 10px',borderRadius:8,border:`1px solid ${C.border}`,fontSize:14,marginTop:8}}>
+                <option value=''>— Choisir un diagnostic —</option>
+                {DIAGNOSTICS_GROUPED.map(g=><optgroup key={g.group} label={g.group}>{g.items.map(d=><option key={d} value={d}>{d}</option>)}</optgroup>)}
+              </select>
+            ):(
+              <textarea value={answers[step]||''} onChange={e=>setAnswers(p=>({...p,[step]:e.target.value}))}
+                placeholder={`Votre analyse — ${STEP_LABELS[step]||step}`} rows={3}
+                style={{width:'100%',padding:'8px 10px',borderRadius:8,border:`1px solid ${C.border}`,fontSize:14,resize:'vertical',marginTop:8}} autoFocus/>
+            )}
+          </div>
+          <div style={{display:'flex',gap:8,marginTop:14}}>
+            {activeStep>0&&<button onClick={()=>setActiveStep(p=>p-1)} style={{padding:'8px 16px',borderRadius:8,border:`1px solid ${C.border}`,background:C.white,cursor:'pointer',fontSize:14}}>← Précédent</button>}
+            <div style={{flex:1}}/>
+            {!isLast?(
+              <button onClick={()=>setActiveStep(p=>p+1)} style={{padding:'8px 20px',borderRadius:8,background:C.primary,color:C.white,border:'none',cursor:'pointer',fontSize:14,fontWeight:600}}>Suivant →</button>
+            ):(
+              <button onClick={submitEcg} style={{padding:'8px 20px',borderRadius:8,background:C.green,color:C.white,border:'none',cursor:'pointer',fontSize:14,fontWeight:700}}>✓ Soumettre</button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* RESULT */
+  if(view==='result'&&lastResult){
+    const {score,maxScore,p,sp,combined,elapsed:t,answers:ans,correction:corr}=lastResult;
+    return(
+      <div style={{minHeight:'100vh',background:C.bg,padding:16}}>
+        <div style={{maxWidth:640,margin:'0 auto'}}>
+          <div style={{background:C.white,borderRadius:16,padding:24,border:`1px solid ${C.border}`,textAlign:'center',marginBottom:16}}>
+            <div style={{fontSize:48,marginBottom:8}}>{p>=81?'🟢':p>=70?'🟡':p>=51?'🟠':'🔴'}</div>
+            <div style={{fontWeight:800,fontSize:32,color:statColor(p)}}>{p}%</div>
+            <div style={{fontSize:15,color:C.textMuted,marginTop:4}}>{score}/{maxScore} points · {fmtTime(t)}</div>
+            {sp!==null&&<div style={{fontSize:13,color:C.textMuted,marginTop:4}}>Score combiné : <b style={{color:statColor(combined)}}>{combined}%</b> <span style={{fontSize:11}}>(analyse 70% · rapidité 30%)</span></div>}
+          </div>
+          <div style={{background:C.white,borderRadius:12,padding:16,border:`1px solid ${C.border}`,marginBottom:12}}>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>Détail de la correction</div>
+            {ALL_STEPS.map(k=>{
+              const isScored=ALL_SCORED.includes(k);
+              const isFC=k==='fc';
+              const hasCorr=k in (corr||{});
+              const correct=isFC?fcCorrect(ans[k],corr[k]):ans[k]===corr[k];
+              return(
+                <div key={k} style={{display:'flex',gap:8,padding:'6px 0',borderBottom:`1px solid ${C.border}`,alignItems:'flex-start'}}>
+                  <span style={{width:16,marginTop:2}}>{isScored&&hasCorr?(correct?'✅':'❌'):'—'}</span>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:600,fontSize:12,color:C.textMuted}}>{STEP_LABELS[k]||k}{isScored&&' (scoré)'}</div>
+                    <div style={{fontSize:13}}>Votre réponse : <span style={{color:correct||!hasCorr?C.green:C.red}}>{ans[k]||<i>non renseigné</i>}</span></div>
+                    {hasCorr&&!correct&&<div style={{fontSize:13,color:C.green}}>Correction : {corr[k]}{isFC&&' (±25 bpm)'}</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={()=>setView('home')} style={{flex:1,padding:'10px 0',borderRadius:8,background:C.primary,color:C.white,border:'none',cursor:'pointer',fontSize:14,fontWeight:700}}>🏠 Accueil</button>
+            {activeEcg&&<button onClick={()=>startEcg(activeEcg)} style={{flex:1,padding:'10px 0',borderRadius:8,border:`1px solid ${C.primary}`,color:C.primary,background:C.primaryL,cursor:'pointer',fontSize:14,fontWeight:600}}>🔄 Rejouer</button>}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* HOME */
+  if(view==='home'){
+    const mySubmissions=(submissions||[]).filter(s=>s.userId===userId&&s.completed);
+    const myAvg=mySubmissions.length?Math.round(mySubmissions.reduce((a,s)=>a+pct(s.score||0,s.maxScore||ALL_SCORED.length),0)/mySubmissions.length):null;
+    return(
+      <div style={{minHeight:'100vh',background:C.bg,padding:16}}>
+        <div style={{maxWidth:720,margin:'0 auto'}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:16}}>
+            <div style={{flex:1}}>
+              <div style={{fontWeight:800,fontSize:22,color:C.primary}}>🫀 ECG Training</div>
+              <div style={{fontSize:12,color:C.textMuted}}>Préhospitalier Genevois · {me?.pseudo||me?.login||'—'}</div>
+            </div>
+            {myAvg!==null&&<div style={{background:statBg(myAvg),borderRadius:8,padding:'6px 12px',textAlign:'center'}}>
+              <div style={{fontWeight:700,color:statColor(myAvg),fontSize:18}}>{myAvg}%</div>
+              <div style={{fontSize:11,color:C.textMuted}}>Mon score</div>
+            </div>}
+            {isAdmin&&<button onClick={()=>setView('admin')} style={{padding:'6px 12px',borderRadius:6,border:`1px solid ${C.primary}`,color:C.primary,background:C.primaryL,cursor:'pointer',fontSize:13}}>Admin</button>}
+            <button onClick={doLogout} style={{padding:'6px 10px',borderRadius:6,border:`1px solid ${C.border}`,background:C.white,cursor:'pointer',fontSize:12,color:C.textMuted}}>Déco.</button>
+          </div>
+          <div style={{display:'flex',gap:4,marginBottom:16,background:C.greyL,borderRadius:10,padding:4}}>
+            {[['ecgs','📋 ECGs'],['training','🏋️ Entraînement'],['knowledge','📚 Références'],['stats','📊 Mes stats']].map(([k,l])=>(
+              <button key={k} onClick={()=>setSubView(k)}
+                style={{flex:1,padding:'7px 4px',borderRadius:7,border:'none',cursor:'pointer',fontSize:12,fontWeight:600,
+                  background:subView===k?C.primary:C.greyL,color:subView===k?C.white:C.grey}}>
+                {l}
+              </button>
+            ))}
+          </div>
+
+          {subView==='ecgs'&&(
+            <>
+              <Leaderboard subs={subs} submissions={submissions}/>
+              <div style={{fontWeight:700,fontSize:15,margin:'16px 0 10px',color:C.primary}}>ECGs disponibles</div>
+              {ecgs.length===0&&<div style={{color:C.textMuted,fontSize:13,padding:'20px 0',textAlign:'center'}}>Aucun ECG disponible. Un admin doit en ajouter.</div>}
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(240px,1fr))',gap:10}}>
+                {ecgs.filter(e=>!e.archived).map(e=>{
+                  const mysubs=mySubmissions.filter(s=>s.ecgId===e.id);
+                  const bestScore=mysubs.length?Math.max(...mysubs.map(s=>pct(s.score||0,s.maxScore||ALL_SCORED.length))):null;
+                  return(
+                    <div key={e.id} style={{background:C.white,border:`1px solid ${C.border}`,borderRadius:10,padding:14,cursor:'pointer'}}
+                      onClick={()=>startEcg(e)}
+                      onMouseEnter={ev=>ev.currentTarget.style.boxShadow='0 2px 12px rgba(21,101,192,0.15)'}
+                      onMouseLeave={ev=>ev.currentTarget.style.boxShadow='none'}>
+                      {e.imageUrl&&<img src={e.imageUrl} alt={e.title} style={{width:'100%',borderRadius:6,maxHeight:90,objectFit:'cover',marginBottom:8}}/>}
+                      <div style={{fontWeight:700,fontSize:14}}>{e.title||'Sans titre'}</div>
+                      {e.category&&<div style={{fontSize:11,color:C.textMuted,marginTop:2}}>{e.category}</div>}
+                      {e.difficulty&&<div style={{fontSize:11,color:C.accent,marginTop:2}}>Difficulté : {e.difficulty}</div>}
+                      {bestScore!==null&&(
+                        <div style={{marginTop:8,display:'flex',alignItems:'center',gap:6}}>
+                          <div style={{flex:1,height:4,borderRadius:2,background:C.greyL,overflow:'hidden'}}>
+                            <div style={{width:`${bestScore}%`,height:'100%',background:statColor(bestScore)}}/>
+                          </div>
+                          <span style={{fontSize:11,fontWeight:600,color:statColor(bestScore)}}>{bestScore}%</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {subView==='training'&&<TrainingMode trainLib={trainLib} stepHelp={stepHelp} stepHelpOverride={stepHelpOverride}/>}
+
+          {subView==='knowledge'&&(
+            <div>
+              <div style={{fontWeight:700,fontSize:15,marginBottom:12,color:C.primary}}>📚 Références & ressources</div>
+              {[
+                {label:'e-cardiogram (Dr Taboulet)',url:'https://www.e-cardiogram.com/',desc:"Ressource de référence pour l'ECG en médecine d'urgence"},
+                {label:'LITFL ECG Library',url:'https://litfl.com/ecg-library/',desc:'Life in the Fast Lane — bibliothèque ECG complète'},
+                {label:'CORFA 6.1',url:null,desc:'Protocoles CORFA — document interne SPA Genève'},
+                {label:'BSC/SMUR Genève — Protocole 5.1 SCA',url:null,desc:'Protocoles BSC/SMUR (v1.7b, 15.12.2023)'},
+              ].map((r,i)=>(
+                <div key={i} style={{background:C.white,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:8,display:'flex',alignItems:'flex-start',gap:10}}>
+                  <div style={{fontSize:20}}>{r.url?'🔗':'📄'}</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:600,fontSize:14}}>{r.label}</div>
+                    <div style={{fontSize:12,color:C.textMuted,marginTop:2}}>{r.desc}</div>
+                    {r.url&&<a href={r.url} target='_blank' rel='noreferrer' style={{fontSize:12,color:C.primary,marginTop:4,display:'block'}}>{r.url}</a>}
+                  </div>
+                </div>
+              ))}
+              {docs.length>0&&(
+                <>
+                  <div style={{fontWeight:600,fontSize:13,margin:'16px 0 8px',color:C.grey}}>Documents internes</div>
+                  {docs.map(d=>(
+                    <div key={d.id} style={{background:C.white,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:6,fontSize:13}}>
+                      <div style={{fontWeight:600}}>{d.title}</div>
+                      {d.url&&<a href={d.url} target='_blank' rel='noreferrer' style={{color:C.primary,fontSize:12}}>{d.url}</a>}
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+
+          {subView==='stats'&&(
+            <div>
+              <div style={{fontWeight:700,fontSize:15,marginBottom:12,color:C.primary}}>📊 Mes statistiques</div>
+              {mySubmissions.length===0?(
+                <div style={{color:C.textMuted,fontSize:13,textAlign:'center',padding:20}}>Aucune soumission pour l'instant.</div>
+              ):(
+                <>
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(130px,1fr))',gap:8,marginBottom:16}}>
+                    {[
+                      {label:'ECG analysés',val:mySubmissions.length,color:C.primary},
+                      {label:'Score moyen',val:`${myAvg}%`,color:statColor(myAvg||0)},
+                      {label:'Meilleur score',val:`${Math.max(...mySubmissions.map(s=>pct(s.score||0,s.maxScore||ALL_SCORED.length)))}%`,color:C.green},
+                    ].map((k,i)=>(
+                      <div key={i} style={{background:C.white,border:`1px solid ${C.border}`,borderRadius:8,padding:12,textAlign:'center'}}>
+                        <div style={{fontSize:22,fontWeight:700,color:k.color}}>{k.val}</div>
+                        <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>{k.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{fontWeight:600,fontSize:13,marginBottom:8}}>Historique</div>
+                  {[...mySubmissions].reverse().slice(0,20).map(s=>{
+                    const ecg=(ecgs||[]).find(e=>e.id===s.ecgId)||{title:s.ecgId};
+                    const p2=pct(s.score||0,s.maxScore||ALL_SCORED.length);
+                    return(
+                      <div key={s.id} style={{background:C.white,border:`1px solid ${C.border}`,borderRadius:8,padding:'8px 12px',marginBottom:6,display:'flex',alignItems:'center',gap:8}}>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:13,fontWeight:600}}>{ecg.title||s.ecgId}</div>
+                          <div style={{fontSize:11,color:C.textMuted}}>{fmtDate(s.completedAt)}{s.timeSeconds!=null&&` · ${fmtTime(s.timeSeconds)}`}</div>
+                        </div>
+                        <div style={{fontWeight:700,color:statColor(p2),fontSize:15}}>{p2}%</div>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  /* ADMIN */
+  if(view==='admin'&&isAdmin){
+    return(
+      <div style={{minHeight:'100vh',background:C.bg,padding:16}}>
+        <div style={{maxWidth:860,margin:'0 auto'}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:16}}>
+            <button onClick={()=>setView('home')} style={{padding:'4px 10px',borderRadius:6,border:`1px solid ${C.border}`,background:C.white,cursor:'pointer',fontSize:12}}>← Accueil</button>
+            <div style={{fontWeight:800,fontSize:20,color:C.primary,flex:1}}>Administration</div>
+          </div>
+          <div style={{display:'flex',gap:4,marginBottom:16,background:C.greyL,borderRadius:10,padding:4,flexWrap:'wrap'}}>
+            {[['ecgs','ECGs'],['refs','Références'],['training','Entraînement'],['stats','Statistiques'],['users','Utilisateurs']].map(([k,l])=>(
+              <button key={k} onClick={()=>setAdminTab(k)}
+                style={{flex:1,minWidth:80,padding:'7px 4px',borderRadius:7,border:'none',cursor:'pointer',fontSize:12,fontWeight:600,
+                  background:adminTab===k?C.primary:C.greyL,color:adminTab===k?C.white:C.grey}}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <div style={{background:C.white,borderRadius:12,padding:16,border:`1px solid ${C.border}`}}>
+
+            {adminTab==='ecgs'&&(
+              <div>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+                  <span style={{fontWeight:700,fontSize:15}}>ECGs d'évaluation ({ecgs.length})</span>
+                  <button onClick={()=>setEcgForm({id:uid(),title:'',category:'',difficulty:'',imageUrl:'',correction:{},archived:false})}
+                    style={{padding:'6px 14px',borderRadius:6,background:C.primary,color:C.white,border:'none',cursor:'pointer',fontSize:13}}>+ Ajouter</button>
+                </div>
+                {ecgForm&&(
+                  <div style={{background:C.greyL,borderRadius:10,padding:14,marginBottom:14}}>
+                    <div style={{fontWeight:600,marginBottom:10}}>{ecgForm.id&&ecgs.find(e=>e.id===ecgForm.id)?'Modifier':'Nouvel'} ECG</div>
+                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
+                      {[{label:'Titre',key:'title'},{label:'Catégorie',key:'category'},{label:'Difficulté',key:'difficulty'},{label:"URL image",key:'imageUrl'}].map(f=>(
+                        <div key={f.key}>
+                          <div style={{fontSize:12,color:C.textMuted,marginBottom:3}}>{f.label}</div>
+                          <input value={ecgForm[f.key]||''} onChange={e=>setEcgForm(p=>({...p,[f.key]:e.target.value}))}
+                            style={{width:'100%',padding:'6px 8px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}/>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{fontWeight:600,fontSize:13,marginBottom:8}}>Correction</div>
+                    {ALL_STEPS.map(k=>(
+                      <div key={k} style={{display:'flex',gap:8,marginBottom:6,alignItems:'center'}}>
+                        <span style={{width:130,fontSize:12,color:C.textMuted,flexShrink:0}}>{STEP_LABELS[k]||k}</span>
+                        {k==='fc'?(
+                          <div style={{display:'flex',alignItems:'center',gap:4,flex:1}}>
+                            <input type="number" value={(ecgForm.correction?.[k]||'').replace(/[^0-9]/g,'')}
+                              onChange={e=>setEcgForm(p=>({...p,correction:{...p.correction,[k]:e.target.value?`${e.target.value} bpm`:''}}))}
+                              placeholder="bpm" style={{width:70,padding:'4px 6px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13,textAlign:'right'}}/>
+                            <span style={{fontSize:13,color:C.textMuted}}>bpm</span>
+                          </div>
+                        ):k==='diagnostic'?(
+                          <select value={ecgForm.correction?.[k]||''} onChange={e=>setEcgForm(p=>({...p,correction:{...p.correction,[k]:e.target.value}}))}
+                            style={{flex:1,padding:'4px 6px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}>
+                            <option value=''>— choisir —</option>
+                            {DIAGNOSTICS_GROUPED.map(g=><optgroup key={g.group} label={g.group}>{g.items.map(d=><option key={d} value={d}>{d}</option>)}</optgroup>)}
+                          </select>
+                        ):(
+                          <input value={ecgForm.correction?.[k]||''} onChange={e=>setEcgForm(p=>({...p,correction:{...p.correction,[k]:e.target.value}}))}
+                            style={{flex:1,padding:'4px 6px',borderRadius:6,border:`1px solid ${C.border}`,fontSize:13}}/>
+                        )}
+                      </div>
+                    ))}
+                    <div style={{display:'flex',gap:8,marginTop:10}}>
+                      <button onClick={()=>{saveEcg(ecgForm);setEcgForm(null)}} style={{padding:'7px 16px',borderRadius:6,background:C.primary,color:C.white,border:'none',cursor:'pointer',fontSize:13}}>Sauvegarder</button>
+                      <button onClick={()=>setEcgForm(null)} style={{padding:'7px 16px',borderRadius:6,border:`1px solid ${C.border}`,background:C.white,cursor:'pointer',fontSize:13}}>Annuler</button>
+                    </div>
+                  </div>
+                )}
+                {ecgs.map(e=>(
+                  <div key={e.id} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 10px',background:e.archived?C.greyL:C.white,border:`1px solid ${C.border}`,borderRadius:8,marginBottom:6,opacity:e.archived?0.6:1}}>
+                    {e.imageUrl&&<img src={e.imageUrl} alt={e.title} style={{width:50,height:34,objectFit:'cover',borderRadius:4}}/>}
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13,fontWeight:600}}>{e.title||'Sans titre'}</div>
+                      <div style={{fontSize:11,color:C.textMuted}}>{e.category||'—'}{e.difficulty&&` · ${e.difficulty}`}</div>
+                    </div>
+                    <button onClick={()=>setEcgForm({...e})} style={{padding:'3px 8px',borderRadius:5,border:`1px solid ${C.primary}`,color:C.primary,background:C.primaryL,cursor:'pointer',fontSize:12}}>Modifier</button>
+                    <button onClick={()=>saveEcg({...e,archived:!e.archived})} style={{padding:'3px 8px',borderRadius:5,border:`1px solid ${C.border}`,color:C.grey,background:C.greyL,cursor:'pointer',fontSize:12}}>
+                      {e.archived?'Publier':'Archiver'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {adminTab==='refs'&&<AdminRefs stepHelp={stepHelp||{}} onSave={h=>{setStepHelp(h);sSet('ecg:stepHelp',h)}}/>}
+            {adminTab==='training'&&<TrainingAdmin trainLib={trainLib} onSave={l=>{setTrainLib(l);sSet('ecg:trainLib',l)}}/>}
+            {adminTab==='stats'&&<AdminStats subs={subs} submissions={submissions} ecgs={ecgs}/>}
+
+            {adminTab==='users'&&(
+              <div>
+                <div style={{fontWeight:700,fontSize:15,marginBottom:12}}>Utilisateurs ({subs.length})</div>
+                <div style={{overflowX:'auto'}}>
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+                    <thead><tr style={{background:C.greyL}}>
+                      {['Pseudo','Login','ECG analysés','Score moy.','Inscrit le','Admin'].map(h=>(
+                        <th key={h} style={{padding:'6px 8px',textAlign:'left',border:`1px solid ${C.border}`,fontWeight:600}}>{h}</th>
+                      ))}
+                    </tr></thead>
+                    <tbody>
+                      {subs.map(s=>{
+                        const mysubs=(submissions||[]).filter(sub=>sub.userId===s.id&&sub.completed);
+                        const avg=mysubs.length?Math.round(mysubs.reduce((a,sub)=>a+pct(sub.score||0,sub.maxScore||ALL_SCORED.length),0)/mysubs.length):null;
+                        const u=(users||[]).find(u=>u.id===s.id);
+                        return(
+                          <tr key={s.id}>
+                            <td style={{padding:'6px 8px',border:`1px solid ${C.border}`,fontWeight:600}}>{s.pseudo||'—'}</td>
+                            <td style={{padding:'6px 8px',border:`1px solid ${C.border}`}}>{s.login}</td>
+                            <td style={{padding:'6px 8px',border:`1px solid ${C.border}`,textAlign:'center'}}>{mysubs.length}</td>
+                            <td style={{padding:'6px 8px',border:`1px solid ${C.border}`,textAlign:'center',color:avg!=null?statColor(avg):C.textMuted,fontWeight:avg!=null?600:400}}>{avg!=null?`${avg}%`:'—'}</td>
+                            <td style={{padding:'6px 8px',border:`1px solid ${C.border}`}}>{fmtDate(s.createdAt)}</td>
+                            <td style={{padding:'6px 8px',border:`1px solid ${C.border}`,textAlign:'center'}}>
+                              <button onClick={()=>{
+                                const nu=(users||[]).map(uu=>uu.id===s.id?{...uu,isAdmin:!uu.isAdmin}:uu);
+                                setUsers(nu);sSet('ecg:users',nu);
+                              }} style={{padding:'2px 7px',borderRadius:4,border:`1px solid ${C.border}`,background:u?.isAdmin?C.amberL:C.white,color:u?.isAdmin?C.amber:C.grey,cursor:'pointer',fontSize:11}}>
+                                {u?.isAdmin?'Admin ✓':'Non'}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return<div style={{padding:20,color:C.textMuted}}>Vue non trouvée.</div>;
+}
+
+ReactDOM.render(<App/>,document.getElementById('root'));
+</script>
+</body>
+</html>
